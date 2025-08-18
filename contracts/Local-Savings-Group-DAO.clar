@@ -1,0 +1,368 @@
+(define-constant CONTRACT_OWNER tx-sender)
+(define-constant ERR_UNAUTHORIZED (err u1))
+(define-constant ERR_MEMBER_NOT_FOUND (err u2))
+(define-constant ERR_MEMBER_ALREADY_EXISTS (err u3))
+(define-constant ERR_INSUFFICIENT_FUNDS (err u4))
+(define-constant ERR_INVALID_AMOUNT (err u5))
+(define-constant ERR_PROPOSAL_NOT_FOUND (err u6))
+(define-constant ERR_ALREADY_VOTED (err u7))
+(define-constant ERR_VOTING_PERIOD_ENDED (err u8))
+(define-constant ERR_PROPOSAL_NOT_APPROVED (err u9))
+(define-constant ERR_LOAN_NOT_FOUND (err u10))
+(define-constant ERR_LOAN_NOT_ACTIVE (err u11))
+(define-constant MIN_CONTRIBUTION u1000000)
+(define-constant VOTING_PERIOD u1008)
+(define-constant INTEREST_RATE u10)
+
+(define-data-var next-member-id uint u1)
+(define-data-var next-proposal-id uint u1)
+(define-data-var next-loan-id uint u1)
+(define-data-var total-funds uint u0)
+(define-data-var total-members uint u0)
+
+(define-map members
+    { member-id: uint }
+    {
+        address: principal,
+        contribution: uint,
+        join-height: uint,
+        active: bool,
+    }
+)
+
+(define-map member-address-to-id
+    { address: principal }
+    { member-id: uint }
+)
+
+(define-map proposals
+    { proposal-id: uint }
+    {
+        proposer: principal,
+        proposal-type: (string-ascii 20),
+        amount: uint,
+        recipient: principal,
+        description: (string-ascii 500),
+        votes-for: uint,
+        votes-against: uint,
+        voting-end-height: uint,
+        executed: bool,
+        created-height: uint,
+    }
+)
+
+(define-map proposal-votes
+    {
+        proposal-id: uint,
+        voter: principal,
+    }
+    { vote: bool }
+)
+
+(define-map loans
+    { loan-id: uint }
+    {
+        borrower: principal,
+        amount: uint,
+        interest-amount: uint,
+        repaid-amount: uint,
+        due-height: uint,
+        active: bool,
+        approved-height: uint,
+    }
+)
+
+(define-read-only (get-member (member-id uint))
+    (map-get? members { member-id: member-id })
+)
+
+(define-read-only (get-member-by-address (address principal))
+    (match (map-get? member-address-to-id { address: address })
+        entry (map-get? members { member-id: (get member-id entry) })
+        none
+    )
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+    (map-get? proposals { proposal-id: proposal-id })
+)
+
+(define-read-only (get-loan (loan-id uint))
+    (map-get? loans { loan-id: loan-id })
+)
+
+(define-read-only (get-total-funds)
+    (var-get total-funds)
+)
+
+(define-read-only (get-total-members)
+    (var-get total-members)
+)
+
+(define-read-only (get-member-vote
+        (proposal-id uint)
+        (voter principal)
+    )
+    (map-get? proposal-votes {
+        proposal-id: proposal-id,
+        voter: voter,
+    })
+)
+
+(define-public (join-group)
+    (let (
+            (member-id (var-get next-member-id))
+            (existing-member (map-get? member-address-to-id { address: tx-sender }))
+        )
+        (asserts! (is-none existing-member) ERR_MEMBER_ALREADY_EXISTS)
+        (try! (stx-transfer? MIN_CONTRIBUTION tx-sender (as-contract tx-sender)))
+        (map-set members { member-id: member-id } {
+            address: tx-sender,
+            contribution: MIN_CONTRIBUTION,
+            join-height: stacks-block-height,
+            active: true,
+        })
+        (map-set member-address-to-id { address: tx-sender } { member-id: member-id })
+        (var-set next-member-id (+ member-id u1))
+        (var-set total-members (+ (var-get total-members) u1))
+        (var-set total-funds (+ (var-get total-funds) MIN_CONTRIBUTION))
+        (ok member-id)
+    )
+)
+
+(define-public (contribute (amount uint))
+    (let (
+            (member-info (unwrap! (get-member-by-address tx-sender) ERR_MEMBER_NOT_FOUND))
+            (member-id-info (unwrap! (map-get? member-address-to-id { address: tx-sender })
+                ERR_MEMBER_NOT_FOUND
+            ))
+            (member-id (get member-id member-id-info))
+        )
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set members { member-id: member-id }
+            (merge member-info { contribution: (+ (get contribution member-info) amount) })
+        )
+        (var-set total-funds (+ (var-get total-funds) amount))
+        (ok true)
+    )
+)
+
+(define-public (create-proposal
+        (proposal-type (string-ascii 20))
+        (amount uint)
+        (recipient principal)
+        (description (string-ascii 500))
+    )
+    (let (
+            (proposal-id (var-get next-proposal-id))
+            (member-info (unwrap! (get-member-by-address tx-sender) ERR_MEMBER_NOT_FOUND))
+        )
+        (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (map-set proposals { proposal-id: proposal-id } {
+            proposer: tx-sender,
+            proposal-type: proposal-type,
+            amount: amount,
+            recipient: recipient,
+            description: description,
+            votes-for: u0,
+            votes-against: u0,
+            voting-end-height: (+ stacks-block-height VOTING_PERIOD),
+            executed: false,
+            created-height: stacks-block-height,
+        })
+        (var-set next-proposal-id (+ proposal-id u1))
+        (ok proposal-id)
+    )
+)
+
+(define-public (vote-on-proposal
+        (proposal-id uint)
+        (vote bool)
+    )
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR_PROPOSAL_NOT_FOUND))
+            (member-info (unwrap! (get-member-by-address tx-sender) ERR_MEMBER_NOT_FOUND))
+            (existing-vote (map-get? proposal-votes {
+                proposal-id: proposal-id,
+                voter: tx-sender,
+            }))
+        )
+        (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
+        (asserts! (is-none existing-vote) ERR_ALREADY_VOTED)
+        (asserts! (<= stacks-block-height (get voting-end-height proposal))
+            ERR_VOTING_PERIOD_ENDED
+        )
+        (map-set proposal-votes {
+            proposal-id: proposal-id,
+            voter: tx-sender,
+        } { vote: vote }
+        )
+        (if vote
+            (map-set proposals { proposal-id: proposal-id }
+                (merge proposal { votes-for: (+ (get votes-for proposal) u1) })
+            )
+            (map-set proposals { proposal-id: proposal-id }
+                (merge proposal { votes-against: (+ (get votes-against proposal) u1) })
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+    (let (
+            (proposal (unwrap! (get-proposal proposal-id) ERR_PROPOSAL_NOT_FOUND))
+            (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+            (majority-threshold (/ (var-get total-members) u2))
+        )
+        (asserts! (> stacks-block-height (get voting-end-height proposal))
+            ERR_VOTING_PERIOD_ENDED
+        )
+        (asserts! (not (get executed proposal)) ERR_PROPOSAL_NOT_APPROVED)
+        (asserts! (> (get votes-for proposal) (get votes-against proposal))
+            ERR_PROPOSAL_NOT_APPROVED
+        )
+        (asserts! (>= (get votes-for proposal) majority-threshold)
+            ERR_PROPOSAL_NOT_APPROVED
+        )
+        (asserts! (<= (get amount proposal) (var-get total-funds))
+            ERR_INSUFFICIENT_FUNDS
+        )
+
+        (if (is-eq (get proposal-type proposal) "loan")
+            (try! (process-loan-proposal proposal-id proposal))
+            (try! (as-contract (stx-transfer? (get amount proposal) tx-sender
+                (get recipient proposal)
+            )))
+        )
+
+        (map-set proposals { proposal-id: proposal-id }
+            (merge proposal { executed: true })
+        )
+        (var-set total-funds (- (var-get total-funds) (get amount proposal)))
+        (ok true)
+    )
+)
+
+(define-private (process-loan-proposal
+        (proposal-id uint)
+        (proposal {
+            proposer: principal,
+            proposal-type: (string-ascii 20),
+            amount: uint,
+            recipient: principal,
+            description: (string-ascii 500),
+            votes-for: uint,
+            votes-against: uint,
+            voting-end-height: uint,
+            executed: bool,
+            created-height: uint,
+        })
+    )
+    (let (
+            (loan-id (var-get next-loan-id))
+            (interest-amount (/ (* (get amount proposal) INTEREST_RATE) u100))
+            (total-amount (+ (get amount proposal) interest-amount))
+        )
+        (map-set loans { loan-id: loan-id } {
+            borrower: (get recipient proposal),
+            amount: (get amount proposal),
+            interest-amount: interest-amount,
+            repaid-amount: u0,
+            due-height: (+ stacks-block-height u4320),
+            active: true,
+            approved-height: stacks-block-height,
+        })
+        (var-set next-loan-id (+ loan-id u1))
+        (as-contract (stx-transfer? (get amount proposal) tx-sender (get recipient proposal)))
+    )
+)
+
+(define-public (repay-loan
+        (loan-id uint)
+        (amount uint)
+    )
+    (let (
+            (loan (unwrap! (get-loan loan-id) ERR_LOAN_NOT_FOUND))
+            (total-due (+ (get amount loan) (get interest-amount loan)))
+            (remaining-due (- total-due (get repaid-amount loan)))
+        )
+        (asserts! (get active loan) ERR_LOAN_NOT_ACTIVE)
+        (asserts! (is-eq (get borrower loan) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= amount remaining-due) ERR_INVALID_AMOUNT)
+
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (let (
+                (new-repaid-amount (+ (get repaid-amount loan) amount))
+                (is-fully-repaid (is-eq new-repaid-amount total-due))
+            )
+            (map-set loans { loan-id: loan-id }
+                (merge loan {
+                    repaid-amount: new-repaid-amount,
+                    active: (not is-fully-repaid),
+                })
+            )
+            (var-set total-funds (+ (var-get total-funds) amount))
+            (ok is-fully-repaid)
+        )
+    )
+)
+
+(define-public (withdraw-contribution (amount uint))
+    (let (
+            (member-info (unwrap! (get-member-by-address tx-sender) ERR_MEMBER_NOT_FOUND))
+            (member-id-info (unwrap! (map-get? member-address-to-id { address: tx-sender })
+                ERR_MEMBER_NOT_FOUND
+            ))
+            (member-id (get member-id member-id-info))
+            (available-amount (- (get contribution member-info) MIN_CONTRIBUTION))
+        )
+        (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= amount available-amount) ERR_INSUFFICIENT_FUNDS)
+        (asserts! (<= amount (var-get total-funds)) ERR_INSUFFICIENT_FUNDS)
+
+        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+        (map-set members { member-id: member-id }
+            (merge member-info { contribution: (- (get contribution member-info) amount) })
+        )
+        (var-set total-funds (- (var-get total-funds) amount))
+        (ok true)
+    )
+)
+
+(define-public (leave-group)
+    (let (
+            (member-info (unwrap! (get-member-by-address tx-sender) ERR_MEMBER_NOT_FOUND))
+            (member-id-info (unwrap! (map-get? member-address-to-id { address: tx-sender })
+                ERR_MEMBER_NOT_FOUND
+            ))
+            (member-id (get member-id member-id-info))
+            (withdrawal-amount (- (get contribution member-info) MIN_CONTRIBUTION))
+        )
+        (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
+        (asserts! (<= withdrawal-amount (var-get total-funds))
+            ERR_INSUFFICIENT_FUNDS
+        )
+
+        (if (> withdrawal-amount u0)
+            (try! (as-contract (stx-transfer? withdrawal-amount tx-sender tx-sender)))
+            true
+        )
+
+        (map-set members { member-id: member-id }
+            (merge member-info { active: false })
+        )
+        (var-set total-members (- (var-get total-members) u1))
+        (var-set total-funds (- (var-get total-funds) withdrawal-amount))
+        (ok withdrawal-amount)
+    )
+)
+
+(define-read-only (get-contract-balance)
+    (stx-get-balance (as-contract tx-sender))
+)
