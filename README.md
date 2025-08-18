@@ -1,0 +1,2 @@
+# Local Savings Group DAO
+
