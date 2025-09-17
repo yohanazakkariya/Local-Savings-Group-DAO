@@ -13,6 +13,12 @@
 (define-constant MIN_CONTRIBUTION u1000000)
 (define-constant VOTING_PERIOD u1008)
 (define-constant INTEREST_RATE u10)
+(define-constant INITIAL_REPUTATION u100)
+(define-constant MIN_REPUTATION u0)
+(define-constant MAX_REPUTATION u200)
+(define-constant REPUTATION_VOTE_BONUS u5)
+(define-constant REPUTATION_LOAN_PENALTY u20)
+(define-constant REPUTATION_LOAN_BONUS u10)
 
 (define-data-var next-member-id uint u1)
 (define-data-var next-proposal-id uint u1)
@@ -27,6 +33,7 @@
         contribution: uint,
         join-height: uint,
         active: bool,
+        reputation: uint,
     }
 )
 
@@ -121,6 +128,7 @@
             contribution: MIN_CONTRIBUTION,
             join-height: stacks-block-height,
             active: true,
+            reputation: INITIAL_REPUTATION,
         })
         (map-set member-address-to-id { address: tx-sender } { member-id: member-id })
         (var-set next-member-id (+ member-id u1))
@@ -208,6 +216,7 @@
                 (merge proposal { votes-against: (+ (get votes-against proposal) u1) })
             )
         )
+        (try! (update-reputation tx-sender REPUTATION_VOTE_BONUS true))
         (ok true)
     )
 )
@@ -307,6 +316,7 @@
                 })
             )
             (var-set total-funds (+ (var-get total-funds) amount))
+            (and is-fully-repaid (is-ok (update-reputation tx-sender REPUTATION_LOAN_BONUS true)))
             (ok is-fully-repaid)
         )
     )
@@ -365,4 +375,62 @@
 
 (define-read-only (get-contract-balance)
     (stx-get-balance (as-contract tx-sender))
+)
+
+(define-read-only (get-member-reputation (address principal))
+    (match (get-member-by-address address)
+        member-info (some (get reputation member-info))
+        none
+    )
+)
+
+(define-private (update-reputation
+        (address principal)
+        (points uint)
+        (is-positive bool)
+    )
+    (let (
+            (member-info (unwrap! (get-member-by-address address) ERR_MEMBER_NOT_FOUND))
+            (member-id-info (unwrap! (map-get? member-address-to-id { address: address })
+                ERR_MEMBER_NOT_FOUND
+            ))
+            (member-id (get member-id member-id-info))
+            (current-reputation (get reputation member-info))
+            (new-reputation (if is-positive
+                (if (> (+ current-reputation points) MAX_REPUTATION)
+                    MAX_REPUTATION
+                    (+ current-reputation points)
+                )
+                (if (< current-reputation points)
+                    MIN_REPUTATION
+                    (- current-reputation points)
+                )
+            ))
+        )
+        (map-set members { member-id: member-id }
+            (merge member-info { reputation: new-reputation })
+        )
+        (ok new-reputation)
+    )
+)
+
+(define-public (penalize-overdue-loan (loan-id uint))
+    (let (
+            (loan (unwrap! (get-loan loan-id) ERR_LOAN_NOT_FOUND))
+            (borrower (get borrower loan))
+        )
+        (asserts! (get active loan) ERR_LOAN_NOT_ACTIVE)
+        (asserts! (> stacks-block-height (get due-height loan))
+            ERR_LOAN_NOT_ACTIVE
+        )
+        (try! (update-reputation borrower REPUTATION_LOAN_PENALTY false))
+        (ok true)
+    )
+)
+
+(define-read-only (get-reputation-weighted-vote (address principal))
+    (match (get-member-reputation address)
+        reputation (/ (* reputation u100) INITIAL_REPUTATION)
+        u0
+    )
 )
