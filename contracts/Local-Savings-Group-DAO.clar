@@ -10,6 +10,7 @@
 (define-constant ERR_PROPOSAL_NOT_APPROVED (err u9))
 (define-constant ERR_LOAN_NOT_FOUND (err u10))
 (define-constant ERR_LOAN_NOT_ACTIVE (err u11))
+(define-constant ERR_PAUSED (err u12))
 (define-constant MIN_CONTRIBUTION u1000000)
 (define-constant VOTING_PERIOD u1008)
 (define-constant INTEREST_RATE u10)
@@ -25,6 +26,7 @@
 (define-data-var next-loan-id uint u1)
 (define-data-var total-funds uint u0)
 (define-data-var total-members uint u0)
+(define-data-var paused bool false)
 
 (define-map members
     { member-id: uint }
@@ -104,6 +106,10 @@
 
 (define-read-only (get-total-members)
     (var-get total-members)
+)
+
+(define-read-only (is-paused)
+    (var-get paused)
 )
 
 (define-read-only (get-member-vote
@@ -227,6 +233,7 @@
             (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
             (majority-threshold (/ (var-get total-members) u2))
         )
+        (asserts! (not (var-get paused)) ERR_PAUSED)
         (asserts! (> stacks-block-height (get voting-end-height proposal))
             ERR_VOTING_PERIOD_ENDED
         )
@@ -331,6 +338,7 @@
             (member-id (get member-id member-id-info))
             (available-amount (- (get contribution member-info) MIN_CONTRIBUTION))
         )
+        (asserts! (not (var-get paused)) ERR_PAUSED)
         (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
         (asserts! (> amount u0) ERR_INVALID_AMOUNT)
         (asserts! (<= amount available-amount) ERR_INSUFFICIENT_FUNDS)
@@ -354,6 +362,7 @@
             (member-id (get member-id member-id-info))
             (withdrawal-amount (- (get contribution member-info) MIN_CONTRIBUTION))
         )
+        (asserts! (not (var-get paused)) ERR_PAUSED)
         (asserts! (get active member-info) ERR_MEMBER_NOT_FOUND)
         (asserts! (<= withdrawal-amount (var-get total-funds))
             ERR_INSUFFICIENT_FUNDS
@@ -432,5 +441,13 @@
     (match (get-member-reputation address)
         reputation (/ (* reputation u100) INITIAL_REPUTATION)
         u0
+    )
+)
+
+(define-public (set-paused (value bool))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (var-set paused value)
+        (ok value)
     )
 )
