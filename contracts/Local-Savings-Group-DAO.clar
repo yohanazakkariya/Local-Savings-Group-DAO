@@ -44,6 +44,16 @@
     { member-id: uint }
 )
 
+(define-map member-metrics
+    { address: principal }
+    {
+        contributions: uint,
+        proposals: uint,
+        votes: uint,
+        loans: uint,
+    }
+)
+
 (define-map proposals
     { proposal-id: uint }
     {
@@ -98,6 +108,10 @@
 
 (define-read-only (get-loan (loan-id uint))
     (map-get? loans { loan-id: loan-id })
+)
+
+(define-read-only (get-member-metrics (address principal))
+    (map-get? member-metrics { address: address })
 )
 
 (define-read-only (get-total-funds)
@@ -159,6 +173,7 @@
             (merge member-info { contribution: (+ (get contribution member-info) amount) })
         )
         (var-set total-funds (+ (var-get total-funds) amount))
+        (update-member-metrics tx-sender "contributions")
         (ok true)
     )
 )
@@ -188,6 +203,7 @@
             created-height: stacks-block-height,
         })
         (var-set next-proposal-id (+ proposal-id u1))
+        (update-member-metrics tx-sender "proposals")
         (ok proposal-id)
     )
 )
@@ -223,6 +239,7 @@
             )
         )
         (try! (update-reputation tx-sender REPUTATION_VOTE_BONUS true))
+        (update-member-metrics tx-sender "votes")
         (ok true)
     )
 )
@@ -293,6 +310,7 @@
             approved-height: stacks-block-height,
         })
         (var-set next-loan-id (+ loan-id u1))
+        (update-member-metrics (get recipient proposal) "loans")
         (as-contract (stx-transfer? (get amount proposal) tx-sender (get recipient proposal)))
     )
 )
@@ -420,6 +438,50 @@
             (merge member-info { reputation: new-reputation })
         )
         (ok new-reputation)
+    )
+)
+
+(define-private (update-member-metrics
+        (address principal)
+        (field (string-ascii 16))
+    )
+    (let (
+            (existing (default-to {
+                contributions: u0,
+                proposals: u0,
+                votes: u0,
+                loans: u0,
+            }
+                (map-get? member-metrics { address: address })
+            ))
+            (contribution-count (get contributions existing))
+            (proposal-count (get proposals existing))
+            (vote-count (get votes existing))
+            (loan-count (get loans existing))
+            (new-contributions (if (is-eq field "contributions")
+                (+ contribution-count u1)
+                contribution-count
+            ))
+            (new-proposals (if (is-eq field "proposals")
+                (+ proposal-count u1)
+                proposal-count
+            ))
+            (new-votes (if (is-eq field "votes")
+                (+ vote-count u1)
+                vote-count
+            ))
+            (new-loans (if (is-eq field "loans")
+                (+ loan-count u1)
+                loan-count
+            ))
+        )
+        (map-set member-metrics { address: address } {
+            contributions: new-contributions,
+            proposals: new-proposals,
+            votes: new-votes,
+            loans: new-loans,
+        })
+        true
     )
 )
 
